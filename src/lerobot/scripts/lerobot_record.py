@@ -70,6 +70,7 @@ from lerobot.cameras import (  # noqa: F401
 )
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
+from lerobot.cameras.orbbec.configuration_orbbec import OrbbecCameraConfig  # noqa: F401
 from lerobot.configs import parser
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.image_writer import safe_stop_image_writer
@@ -95,6 +96,7 @@ from lerobot.robots import (  # noqa: F401
     bi_so100_follower,
     hope_jr,
     koch_follower,
+    bi_piper,
     make_robot_from_config,
     so100_follower,
     so101_follower,
@@ -195,8 +197,12 @@ class RecordConfig:
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
 
+        # Allow recording without teleop/policy for robots that support direct position reading
+        # (e.g., kinesthetic teaching where actions are current joint positions)
         if self.teleop is None and self.policy is None:
-            raise ValueError("Choose a policy, a teleoperator or both to control the robot")
+            # Check if robot supports direct recording by reading current positions
+            if self.robot.type not in ["bi_piper"]:  # Add other robots that support this mode
+                raise ValueError("Choose a policy, a teleoperator or both to control the robot")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:
@@ -332,6 +338,22 @@ def record_loop(
             base_action = robot._from_keyboard_to_base_action(keyboard_action)
             act = {**arm_action, **base_action} if len(base_action) > 0 else arm_action
             act_processed_teleop = teleop_action_processor((act, obs))
+        elif policy is None and teleop is None:
+            # Direct recording mode: use current joint positions as actions (kinesthetic teaching)
+            # Extract position values from observation for action features
+            action = {}
+            for action_key in robot.action_features:
+                if action_key in obs:
+                    action[action_key] = obs[action_key]
+                else:
+                    logging.warning(f"Action key '{action_key}' not found in observation. Skipping.")
+
+            if not action:
+                logging.info(
+                    "No valid action data found in observation for direct recording mode. "
+                    "This might happen during initialization."
+                )
+                continue
         else:
             logging.info(
                 "No policy or teleoperator provided, skipping action generation."

@@ -17,15 +17,14 @@ import glob
 import importlib
 import logging
 import shutil
-import tempfile
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from threading import Lock
 from typing import Any, ClassVar
 
 import av
-import fsspec
+import cv2
+import numpy as np
 import pyarrow as pa
 import torch
 import torchvision
@@ -171,67 +170,14 @@ def decode_video_frames_torchvision(
     return closest_frames
 
 
-class VideoDecoderCache:
-    """Thread-safe cache for video decoders to avoid expensive re-initialization."""
-
-    def __init__(self):
-        self._cache: dict[str, tuple[Any, Any]] = {}
-        self._lock = Lock()
-
-    def get_decoder(self, video_path: str):
-        """Get a cached decoder or create a new one."""
-        if importlib.util.find_spec("torchcodec"):
-            from torchcodec.decoders import VideoDecoder
-        else:
-            raise ImportError("torchcodec is required but not available.")
-
-        video_path = str(video_path)
-
-        with self._lock:
-            if video_path not in self._cache:
-                file_handle = fsspec.open(video_path).__enter__()
-                decoder = VideoDecoder(file_handle, seek_mode="approximate")
-                self._cache[video_path] = (decoder, file_handle)
-
-            return self._cache[video_path][0]
-
-    def clear(self):
-        """Clear the cache and close file handles."""
-        with self._lock:
-            for _, file_handle in self._cache.values():
-                file_handle.close()
-            self._cache.clear()
-
-    def size(self) -> int:
-        """Return the number of cached decoders."""
-        with self._lock:
-            return len(self._cache)
-
-
-class FrameTimestampError(ValueError):
-    """Helper error to indicate the retrieved timestamps exceed the queried ones"""
-
-    pass
-
-
-_default_decoder_cache = VideoDecoderCache()
-
-
 def decode_video_frames_torchcodec(
     video_path: Path | str,
     timestamps: list[float],
     tolerance_s: float,
+    device: str = "cpu",
     log_loaded_timestamps: bool = False,
-    decoder_cache: VideoDecoderCache | None = None,
 ) -> torch.Tensor:
     """Loads frames associated with the requested timestamps of a video using torchcodec.
-
-    Args:
-        video_path: Path to the video file.
-        timestamps: List of timestamps to extract frames.
-        tolerance_s: Allowed deviation in seconds for frame retrieval.
-        log_loaded_timestamps: Whether to log loaded timestamps.
-        decoder_cache: Optional decoder cache instance. Uses default if None.
 
     Note: Setting device="cuda" outside the main process, e.g. in data loader workers, will lead to CUDA initialization errors.
 
@@ -241,24 +187,27 @@ def decode_video_frames_torchcodec(
     and all subsequent frames until reaching the requested frame. The number of key frames in a video
     can be adjusted during encoding to take into account decoding time and video size in bytes.
     """
-    if decoder_cache is None:
-        decoder_cache = _default_decoder_cache
 
-    # Use cached decoder instead of creating new one each time
-    decoder = decoder_cache.get_decoder(str(video_path))
+    if importlib.util.find_spec("torchcodec"):
+        from torchcodec.decoders import VideoDecoder
+    else:
+        raise ImportError("torchcodec is required but not available.")
 
-    loaded_ts = []
+    # initialize video decoder
+    decoder = VideoDecoder(video_path, device=device, seek_mode="approximate")
     loaded_frames = []
-
+    loaded_ts = []
     # get metadata for frame information
     metadata = decoder.metadata
     average_fps = metadata.average_fps
+
     # convert timestamps to frame indices
     frame_indices = [round(ts * average_fps) for ts in timestamps]
+
     # retrieve frames based on indices
     frames_batch = decoder.get_frames_at(indices=frame_indices)
 
-    for frame, pts in zip(frames_batch.data, frames_batch.pts_seconds, strict=True):
+    for frame, pts in zip(frames_batch.data, frames_batch.pts_seconds, strict=False):
         loaded_frames.append(frame)
         loaded_ts.append(pts.item())
         if log_loaded_timestamps:
@@ -289,14 +238,10 @@ def decode_video_frames_torchcodec(
     if log_loaded_timestamps:
         logging.info(f"{closest_ts=}")
 
-    # convert to float32 in [0,1] range
-    closest_frames = (closest_frames / 255.0).type(torch.float32)
+    # convert to float32 in [0,1] range (channel first)
+    closest_frames = closest_frames.type(torch.float32) / 255
 
-    if not len(timestamps) == len(closest_frames):
-        raise FrameTimestampError(
-            f"Retrieved timestamps differ from queried {set(closest_frames) - set(timestamps)}"
-        )
-
+    assert len(timestamps) == len(closest_frames)
     return closest_frames
 
 
@@ -320,11 +265,7 @@ def encode_video_frames(
     video_path = Path(video_path)
     imgs_dir = Path(imgs_dir)
 
-    if video_path.exists() and not overwrite:
-        logging.warning(f"Video file already exists: {video_path}. Skipping encoding.")
-        return
-
-    video_path.parent.mkdir(parents=True, exist_ok=True)
+    video_path.parent.mkdir(parents=True, exist_ok=overwrite)
 
     # Encoders/pixel formats incompatibility check
     if (vcodec == "libsvtav1" or vcodec == "hevc") and pix_fmt == "yuv444p":
@@ -334,16 +275,16 @@ def encode_video_frames(
         pix_fmt = "yuv420p"
 
     # Get input frames
-    template = "frame-" + ("[0-9]" * 6) + ".png"
+    template = "frame_" + ("[0-9]" * 6) + ".png"
     input_list = sorted(
-        glob.glob(str(imgs_dir / template)), key=lambda x: int(x.split("-")[-1].split(".")[0])
+        glob.glob(str(imgs_dir / template)), key=lambda x: int(x.split("_")[-1].split(".")[0])
     )
 
     # Define video output frame size (assuming all input frames are the same size)
     if len(input_list) == 0:
         raise FileNotFoundError(f"No images found in {imgs_dir}.")
-    with Image.open(input_list[0]) as dummy_image:
-        width, height = dummy_image.size
+    dummy_image = Image.open(input_list[0])
+    width, height = dummy_image.size
 
     # Define video codec options
     video_options = {}
@@ -361,7 +302,7 @@ def encode_video_frames(
 
     # Set logging level
     if log_level is not None:
-        # "While less efficient, it is generally preferable to modify logging with Python's logging"
+        # "While less efficient, it is generally preferable to modify logging with Python’s logging"
         logging.getLogger("libav").setLevel(log_level)
 
     # Create and open output file (overwrite by default)
@@ -373,12 +314,11 @@ def encode_video_frames(
 
         # Loop through input frames and encode them
         for input_data in input_list:
-            with Image.open(input_data) as input_image:
-                input_image = input_image.convert("RGB")
-                input_frame = av.VideoFrame.from_image(input_image)
-                packet = output_stream.encode(input_frame)
-                if packet:
-                    output.mux(packet)
+            input_image = Image.open(input_data).convert("RGB")
+            input_frame = av.VideoFrame.from_image(input_image)
+            packet = output_stream.encode(input_frame)
+            if packet:
+                output.mux(packet)
 
         # Flush the encoder
         packet = output_stream.encode()
@@ -393,87 +333,110 @@ def encode_video_frames(
         raise OSError(f"Video encoding did not work. File not found: {video_path}.")
 
 
-def concatenate_video_files(
-    input_video_paths: list[Path | str], output_video_path: Path, overwrite: bool = True
-):
+def encode_depth_preview_frames(
+    imgs_dir: Path | str,
+    preview_path: Path | str,
+    fps: int,
+    colormap: bool = False,
+) -> None:
     """
-    Concatenate multiple video files into a single video file using pyav.
-
-    This function takes a list of video input file paths and concatenates them into a single
-    output video file. It uses ffmpeg's concat demuxer with stream copy mode for fast
-    concatenation without re-encoding.
-
+    Encode a human-visible preview video from RGB-encoded depth frames.
+    
+    This function reads RGB-encoded depth PNG frames (where R=high byte, G=low byte),
+    reconstructs the uint16 depth values, normalizes them to 0-255 for visualization
+    using per-frame min/max normalization, and encodes as a standard RGB video.
+    
+    The preview video is saved separately and does not interfere with dataset loading.
+    It's useful for human inspection/debugging but should not be used for training.
+    
     Args:
-        input_video_paths: Ordered list of input video file paths to concatenate.
-        output_video_path: Path to the output video file.
-        overwrite: Whether to overwrite the output video file if it already exists. Default is True.
-
-    Note:
-        - Creates a temporary directory for intermediate files that is cleaned up after use.
-        - Uses ffmpeg's concat demuxer which requires all input videos to have the same
-          codec, resolution, and frame rate for proper concatenation.
+        imgs_dir: Directory containing frame_XXXXXX.png files (RGB-encoded depth)
+        preview_path: Output path for the preview video (.mp4)
+        fps: Frames per second for the video
+        colormap: If True, applies VIRIDIS colormap for better visualization
+    
+    Raises:
+        FileNotFoundError: If no PNG frames found in imgs_dir
+        OSError: If video encoding fails
     """
-
-    output_video_path = Path(output_video_path)
-
-    if output_video_path.exists() and not overwrite:
-        logging.warning(f"Video file already exists: {output_video_path}. Skipping concatenation.")
-        return
-
-    output_video_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if len(input_video_paths) == 0:
-        raise FileNotFoundError("No input video paths provided.")
-
-    # Create a temporary .ffconcat file to list the input video paths
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".ffconcat", delete=False) as tmp_concatenate_file:
-        tmp_concatenate_file.write("ffconcat version 1.0\n")
-        for input_path in input_video_paths:
-            tmp_concatenate_file.write(f"file '{str(input_path.resolve())}'\n")
-        tmp_concatenate_file.flush()
-        tmp_concatenate_path = tmp_concatenate_file.name
-
-    # Create input and output containers
-    input_container = av.open(
-        tmp_concatenate_path, mode="r", format="concat", options={"safe": "0"}
-    )  # safe = 0 allows absolute paths as well as relative paths
-
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp_named_file:
-        tmp_output_video_path = tmp_named_file.name
-
-    output_container = av.open(
-        tmp_output_video_path, mode="w", options={"movflags": "faststart"}
-    )  # faststart is to move the metadata to the beginning of the file to speed up loading
-
-    # Replicate input streams in output container
-    stream_map = {}
-    for input_stream in input_container.streams:
-        if input_stream.type in ("video", "audio", "subtitle"):  # only copy compatible streams
-            stream_map[input_stream.index] = output_container.add_stream_from_template(
-                template=input_stream, opaque=True
-            )
-
-            # set the time base to the input stream time base (missing in the codec context)
-            stream_map[input_stream.index].time_base = input_stream.time_base
-
-    # Demux + remux packets (no re-encode)
-    for packet in input_container.demux():
-        # Skip packets from un-mapped streams
-        if packet.stream.index not in stream_map:
-            continue
-
-        # Skip demux flushing packets
-        if packet.dts is None:
-            continue
-
-        output_stream = stream_map[packet.stream.index]
-        packet.stream = output_stream
-        output_container.mux(packet)
-
-    input_container.close()
-    output_container.close()
-    shutil.move(tmp_output_video_path, output_video_path)
-    Path(tmp_concatenate_path).unlink()
+    imgs_dir = Path(imgs_dir)
+    preview_path = Path(preview_path)
+    
+    # Get input frames
+    template = "frame_" + ("[0-9]" * 6) + ".png"
+    input_list = sorted(
+        glob.glob(str(imgs_dir / template)), key=lambda x: int(x.split("_")[-1].split(".")[0])
+    )
+    
+    if len(input_list) == 0:
+        raise FileNotFoundError(f"No images found in {imgs_dir}.")
+    
+    # Get frame dimensions from first frame
+    dummy_image = Image.open(input_list[0])
+    width, height = dummy_image.size
+    
+    # Create output directory
+    preview_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Set logging level
+    logging.getLogger("libav").setLevel(av.logging.ERROR)
+    
+    # Create and open output file
+    with av.open(str(preview_path), "w") as output:
+        # Use h264 codec for better compatibility with video players
+        output_stream = output.add_stream("h264", fps)
+        output_stream.pix_fmt = "yuv420p"
+        output_stream.width = width
+        output_stream.height = height
+        
+        # Process each frame
+        for input_path in input_list:
+            # Load RGB-encoded depth frame
+            rgb_image = Image.open(input_path)
+            rgb_array = np.array(rgb_image)  # (H, W, 3)
+            
+            # Reconstruct uint16 depth: depth = (R << 8) | G
+            depth = (rgb_array[:, :, 0].astype(np.uint16) << 8) | rgb_array[:, :, 1].astype(np.uint16)
+            
+            # Normalize to 0-255 for visualization using per-frame min/max normalization
+            # Note: We must reconstruct first because RGB channels are high/low bytes, not actual depth values
+            # Normalizing RGB directly would give incorrect results
+            nonzero_mask = depth > 0
+            if nonzero_mask.any():
+                # Normalize only nonzero pixels, keep zeros as black
+                vis_array = np.zeros_like(depth, dtype=np.uint8)
+                vis_array[nonzero_mask] = cv2.normalize(
+                    depth[nonzero_mask], None, 0, 255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
+                )
+            else:
+                # No valid depth, output all zeros
+                vis_array = np.zeros_like(depth, dtype=np.uint8)
+            
+            # Apply colormap if requested
+            if colormap:
+                colored = cv2.applyColorMap(vis_array, cv2.COLORMAP_VIRIDIS)  # Returns BGR
+                vis_rgb = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
+                vis_image = Image.fromarray(vis_rgb)
+            else:
+                # Convert grayscale to RGB (3 channels) for video encoding
+                vis_image = Image.fromarray(vis_array, mode="L").convert("RGB")
+            
+            # Encode frame
+            input_frame = av.VideoFrame.from_image(vis_image)
+            packet = output_stream.encode(input_frame)
+            if packet:
+                output.mux(packet)
+        
+        # Flush the encoder
+        packet = output_stream.encode()
+        if packet:
+            output.mux(packet)
+    
+    # Reset logging level
+    av.logging.restore_default_callback()
+    
+    if not preview_path.exists():
+        raise OSError(f"Preview video encoding did not work. File not found: {preview_path}.")
 
 
 @dataclass
@@ -586,26 +549,17 @@ def get_video_pixel_channels(pix_fmt: str) -> int:
         raise ValueError("Unknown format")
 
 
-def get_video_duration_in_s(video_path: Path | str) -> float:
-    """
-    Get the duration of a video file in seconds using PyAV.
-
-    Args:
-        video_path: Path to the video file.
-
-    Returns:
-        Duration of the video in seconds.
-    """
-    with av.open(str(video_path)) as container:
-        # Get the first video stream
-        video_stream = container.streams.video[0]
-        # Calculate duration: stream.duration * stream.time_base gives duration in seconds
-        if video_stream.duration is not None:
-            duration = float(video_stream.duration * video_stream.time_base)
-        else:
-            # Fallback to container duration if stream duration is not available
-            duration = float(container.duration / av.time_base)
-    return duration
+def get_image_pixel_channels(image: Image):
+    if image.mode == "L":
+        return 1  # Grayscale
+    elif image.mode == "LA":
+        return 2  # Grayscale + Alpha
+    elif image.mode == "RGB":
+        return 3  # RGB
+    elif image.mode == "RGBA":
+        return 4  # RGBA
+    else:
+        raise ValueError("Unknown format")
 
 
 class VideoEncodingManager:
@@ -641,10 +595,7 @@ class VideoEncodingManager:
                 f"Encoding remaining {self.dataset.episodes_since_last_encoding} episodes, "
                 f"from episode {start_ep} to {end_ep - 1}"
             )
-            self.dataset._batch_save_episode_video(start_ep, end_ep)
-
-        # Finalize the dataset to properly close all writers
-        self.dataset.finalize()
+            self.dataset.batch_encode_videos(start_ep, end_ep)
 
         # Clean up episode images if recording was interrupted
         if exc_type is not None:
@@ -672,3 +623,56 @@ class VideoEncodingManager:
             logging.debug(f"Images directory is not empty, containing {len(png_files)} PNG files")
 
         return False  # Don't suppress the original exception
+
+
+def reconstruct_depth_from_rgb(frames: torch.Tensor) -> torch.Tensor:
+    """
+    Reconstruct 16-bit depth from RGB-encoded video frames.
+    
+    DECODING EXPLANATION:
+    When depth images are encoded into videos, each 16-bit depth value is split into
+    two 8-bit values stored in RGB channels:
+    - R channel = high byte (upper 8 bits, represents values 0-255 * 256)
+    - G channel = low byte (lower 8 bits, represents values 0-255)
+    - B channel = 0 (unused)
+    
+    To reconstruct the original depth value:
+    1. Read R channel (high byte) and multiply by 256 (shift left 8 bits)
+    2. Read G channel (low byte) and add it
+    3. Result = (high_byte * 256) + low_byte
+    
+    Example reconstruction:
+    - R channel = 19, G channel = 136
+    - Reconstructed depth = (19 * 256) + 136 = 4864 + 136 = 5000 millimeters ✓
+    
+    This preserves full 16-bit precision (0-65535) instead of losing precision
+    by normalizing to 8-bit (0-255).
+    
+    Args:
+        frames: Tensor of shape (..., C, H, W) where C=3, values in [0, 1] float32
+                R channel contains high byte, G channel contains low byte
+                Can handle batches: (N, C, H, W) or single: (C, H, W)
+    
+    Returns:
+        Tensor of shape (..., H, W) with uint16 depth values (millimeters)
+    """
+    # Handle batch dimension
+    if frames.ndim == 3:  # (C, H, W)
+        frames = frames.unsqueeze(0)
+        squeeze_output = True
+    else:
+        squeeze_output = False
+    
+    # Convert from [0, 1] float32 back to uint8 [0, 255]
+    # Video decoders return values in [0, 1] range, so multiply by 255 to get bytes
+    r = (frames[:, 0, :, :] * 255).clamp(0, 255).byte()  # High byte (R channel)
+    g = (frames[:, 1, :, :] * 255).clamp(0, 255).byte()  # Low byte (G channel)
+    
+    # Reconstruct uint16: depth = (high_byte * 256) + low_byte
+    # Left shift by 8 bits = multiply by 256, then OR with low byte = add
+    depth = (r.to(torch.uint16) << 8) | g.to(torch.uint16)
+    
+    if squeeze_output:
+        depth = depth.squeeze(0)
+    
+    return depth

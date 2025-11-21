@@ -18,6 +18,7 @@ import queue
 import threading
 from pathlib import Path
 
+import cv2
 import numpy as np
 import PIL.Image
 import torch
@@ -39,9 +40,37 @@ def safe_stop_image_writer(func):
 
 
 def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) -> PIL.Image.Image:
-    # TODO(aliberts): handle 1 channel and 4 for depth images
+    # Handle single-channel (depth) images
+    if image_array.ndim == 2:
+        # Depth image: encode 16-bit depth into RGB channels to preserve precision
+        if image_array.dtype == np.uint16:
+            # ENCODING EXPLANATION:
+            # A uint16 number stores values 0-65535 using 2 bytes (16 bits total).
+            # Since video codecs only support 8-bit channels (0-255), we split each
+            # 16-bit depth value into two 8-bit values:
+            #
+            # Example: depth value = 5000 (millimeters)
+            # - Binary: 00010011 10001000 (16 bits)
+            # - High byte (upper 8 bits): 00010011 = 19 (bits 15-8)
+            # - Low byte (lower 8 bits):  10001000 = 136 (bits 7-0)
+            # - Reconstruction: 19 * 256 + 136 = 4864 + 136 = 5000 ✓
+            #
+            # We store these bytes in RGB channels:
+            # - R channel = high byte (the "bigger" part, represents 0-255 * 256)
+            # - G channel = low byte (the "smaller" part, represents 0-255)
+            # - B channel = 0 (unused)
+            high_byte = (image_array >> 8).astype(np.uint8)  # Upper 8 bits: shift right by 8
+            low_byte = (image_array & 0xFF).astype(np.uint8)   # Lower 8 bits: mask with 0xFF (255)
+            zero_channel = np.zeros_like(high_byte, dtype=np.uint8)  # B channel = 0
+            # Stack as RGB: (H, W, 3)
+            rgb_depth = np.stack([high_byte, low_byte, zero_channel], axis=-1)
+            return PIL.Image.fromarray(rgb_depth)
+        else:
+            raise ValueError(f"Unsupported depth image dtype: {image_array.dtype}")
+    
+    # Handle 3-channel (RGB) images
     if image_array.ndim != 3:
-        raise ValueError(f"The array has {image_array.ndim} dimensions, but 3 is expected for an image.")
+        raise ValueError(f"The array has {image_array.ndim} dimensions, but 2 (depth) or 3 (RGB) is expected for an image.")
 
     if image_array.shape[0] == 3:
         # Transpose from pytorch convention (C, H, W) to (H, W, C)
@@ -49,7 +78,7 @@ def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) 
 
     elif image_array.shape[-1] != 3:
         raise NotImplementedError(
-            f"The image has {image_array.shape[-1]} channels, but 3 is required for now."
+            f"The image has {image_array.shape[-1]} channels, but 3 is required for RGB images."
         )
 
     if image_array.dtype != np.uint8:
@@ -68,30 +97,7 @@ def image_array_to_pil_image(image_array: np.ndarray, range_check: bool = True) 
     return PIL.Image.fromarray(image_array)
 
 
-def write_image(image: np.ndarray | PIL.Image.Image, fpath: Path, compress_level: int = 1):
-    """
-    Saves a NumPy array or PIL Image to a file.
-
-    This function handles both NumPy arrays and PIL Image objects, converting
-    the former to a PIL Image before saving. It includes error handling for
-    the save operation.
-
-    Args:
-        image (np.ndarray | PIL.Image.Image): The image data to save.
-        fpath (Path): The destination file path for the image.
-        compress_level (int, optional): The compression level for the saved
-            image, as used by PIL.Image.save(). Defaults to 1.
-            Refer to: https://github.com/huggingface/lerobot/pull/2135
-            for more details on the default value rationale.
-
-    Raises:
-        TypeError: If the input 'image' is not a NumPy array or a
-            PIL.Image.Image object.
-
-    Side Effects:
-        Prints an error message to the console if the image writing process
-        fails for any reason.
-    """
+def write_image(image: np.ndarray | PIL.Image.Image, fpath: Path):
     try:
         if isinstance(image, np.ndarray):
             img = image_array_to_pil_image(image)
@@ -99,7 +105,7 @@ def write_image(image: np.ndarray | PIL.Image.Image, fpath: Path, compress_level
             img = image
         else:
             raise TypeError(f"Unsupported image type: {type(image)}")
-        img.save(fpath, compress_level=compress_level)
+        img.save(fpath)
     except Exception as e:
         print(f"Error writing image {fpath}: {e}")
 
