@@ -35,7 +35,7 @@ from ..camera import Camera
 from ..configs import ColorMode
 from ..utils import get_cv2_rotation
 from .configuration_orbbec import OrbbecCameraConfig
-from ...errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+from ...utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 logger = logging.getLogger(__name__)
 
