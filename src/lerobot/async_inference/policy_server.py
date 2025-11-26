@@ -61,6 +61,7 @@ from .helpers import (
     observations_similar,
     raw_observation_to_observation,
 )
+from lerobot.policies.pi05 import make_pi05_pre_post_processors  # noqa: E402
 
 
 class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
@@ -151,19 +152,154 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         policy_class = get_policy_class(self.policy_type)
 
         start = time.perf_counter()
+        
         self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
         self.policy.to(self.device)
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
-        self.preprocessor, self.postprocessor = make_pre_post_processors(
+        self.preprocessor, self.postprocessor = make_pi05_pre_post_processors(
             self.policy.config,
-            pretrained_path=policy_specs.pretrained_name_or_path,
-            preprocessor_overrides={
-                "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
-            },
-            postprocessor_overrides={"device_processor": device_override},
+            dataset_stats={
+    "observation.state": {
+      "mean": [
+        3362.87841796875,
+        61854.99609375,
+        -41536.1875,
+        -12114.6767578125,
+        24830.138671875,
+        -14411.130859375,
+        25.945032119750977,
+        -6882.44189453125,
+        58966.40234375,
+        -38183.02734375,
+        15788.9208984375,
+        21776.1484375,
+        13494.1943359375,
+        26.249692916870117
+      ],
+      "std": [
+        25595.03125,
+        39756.76171875,
+        37075.859375,
+        26674.69140625,
+        26101.3046875,
+        28160.1328125,
+        33.00141525268555,
+        26450.865234375,
+        39704.15234375,
+        35969.69921875,
+        23950.63671875,
+        27378.966796875,
+        28564.62890625,
+        34.10693359375
+      ],
+      "q01": [
+        -63037.119999999995,
+        757.0,
+        -143417.0,
+        -88629.0,
+        -63983.0,
+        -88261.59,
+        -0.8999999761581421,
+        -60181.0,
+        820.0,
+        -134346.0,
+        -37742.06,
+        -68804.0,
+        -62914.0,
+        -0.8999999761581421
+      ],
+      "q99": [
+        54073.53000000003,
+        132579.0,
+        -88.0,
+        44589.0,
+        67350.0,
+        64794.0,
+        97.9000015258789,
+        59677.0,
+        130670.0,
+        -48.0,
+        87760.0,
+        67621.0,
+        94100.12000000011,
+        99.0
+      ]
+    },
+    "actions": {
+      "mean": [
+        3362.87841796875,
+        61854.99609375,
+        -41536.1875,
+        -12114.6767578125,
+        24830.138671875,
+        -14411.130859375,
+        25.945032119750977,
+        -6882.44189453125,
+        58966.40234375,
+        -38183.02734375,
+        15788.9208984375,
+        21776.1484375,
+        13494.1943359375,
+        26.249692916870117
+      ],
+      "std": [
+        25595.03125,
+        39756.76171875,
+        37075.859375,
+        26674.69140625,
+        26101.3046875,
+        28160.1328125,
+        33.00141525268555,
+        26450.865234375,
+        39704.15234375,
+        35969.69921875,
+        23950.63671875,
+        27378.966796875,
+        28564.62890625,
+        34.10693359375
+      ],
+      "q01": [
+        -63037.119999999995,
+        757.0,
+        -143417.0,
+        -88629.0,
+        -63983.0,
+        -88261.59,
+        -0.8999999761581421,
+        -60181.0,
+        820.0,
+        -134346.0,
+        -37742.06,
+        -68804.0,
+        -62914.0,
+        -0.8999999761581421
+      ],
+      "q99": [
+        54073.53000000003,
+        132579.0,
+        -88.0,
+        44589.0,
+        67350.0,
+        64794.0,
+        97.9000015258789,
+        59677.0,
+        130670.0,
+        -48.0,
+        87760.0,
+        67621.0,
+        94100.12000000011,
+        99.0
+      ]
+    }
+}
+            # pretrained_path=policy_specs.pretrained_name_or_path,
+            # preprocessor_overrides={
+            #     "device_processor": device_override,
+            #     "rename_observations_processor": {"rename_map": policy_specs.rename_map},
+            # },
+            # postprocessor_overrides={"device_processor": device_override},
         )
 
         end = time.perf_counter()

@@ -56,7 +56,9 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     so100_follower,
     so101_follower,
+    bi_piper,
 )
+from lerobot.robots.bi_piper import BiPiper, BiPiperConfig
 from lerobot.transport import (
     services_pb2,  # type: ignore
     services_pb2_grpc,  # type: ignore
@@ -89,9 +91,22 @@ class RobotClient:
         Args:
             config: RobotClientConfig containing all configuration parameters
         """
-        # Store configuration
+        # Stoso101_followerre configuration
         self.config = config
-        self.robot = make_robot_from_config(config.robot)
+        cameras_config: dict[str, any] = {
+            "right": RealSenseCameraConfig(serial_number_or_name=218622271965, width=424, height=240,fps=30,),
+            "left": RealSenseCameraConfig(serial_number_or_name=218622274856, width=424, height=240,fps=30),
+            "top": OpenCVCameraConfig( index_or_path="/dev/video8", height=480, fps=30, width=640),
+            # "top": OrbbecCameraConfig(index_or_path=0, height=480, fps=30, width=640)
+            # # Add other views like "front" if available
+        }
+        self.robot = BiPiper(
+            BiPiperConfig(
+                left_arm_can_port="can0",
+                right_arm_can_port="can1",
+                cameras=cameras_config
+            )
+        )
         self.robot.connect()
 
         lerobot_features = map_robot_keys_to_lerobot_features(self.robot)
@@ -143,12 +158,15 @@ class RobotClient:
         """Start the robot client and connect to the policy server"""
         try:
             # client-server handshake
+            self.logger.debug(f"START HANDSHAKE")
+
             start_time = time.perf_counter()
             self.stub.Ready(services_pb2.Empty())
             end_time = time.perf_counter()
             self.logger.debug(f"Connected to policy server in {end_time - start_time:.4f}s")
 
             # send policy instructions
+            self.logger.info(f"SEND INSTRUCTIONS")
             policy_config_bytes = pickle.dumps(self.policy_config)
             policy_setup = services_pb2.PolicySetup(data=policy_config_bytes)
 
@@ -160,6 +178,8 @@ class RobotClient:
             )
 
             self.stub.SendPolicyInstructions(policy_setup)
+
+            self.logger.info("READY")
 
             self.shutdown_event.clear()
 
@@ -360,6 +380,7 @@ class RobotClient:
             self.action_queue_size.append(self.action_queue.qsize())
             # Get action from queue
             timed_action = self.action_queue.get_nowait()
+            print(timed_action)
         get_end = time.perf_counter() - get_start
 
         _performed_action = self.robot.send_action(
@@ -468,9 +489,6 @@ class RobotClient:
 @draccus.wrap()
 def async_client(cfg: RobotClientConfig):
     logging.info(pformat(asdict(cfg)))
-
-    if cfg.robot.type not in SUPPORTED_ROBOTS:
-        raise ValueError(f"Robot {cfg.robot.type} not yet supported!")
 
     client = RobotClient(cfg)
 

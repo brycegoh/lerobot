@@ -112,7 +112,7 @@ class RobotClientConfig:
     pretrained_name_or_path: str = field(metadata={"help": "Pretrained model name or path"})
 
     # Robot configuration (for CLI usage - robot instance will be created from this)
-    robot: RobotConfig = field(metadata={"help": "Robot configuration"})
+    # robot: RobotConfig = field(metadata={"help": "Robot configuration"})
 
     # Policies typically output K actions at max, but we can use less to avoid wasting bandwidth (as actions
     # would be aggregated on the client side anyway, depending on the value of `chunk_size_threshold`)
@@ -139,7 +139,7 @@ class RobotClientConfig:
 
     # Debug configuration
     debug_visualize_queue_size: bool = field(
-        default=False, metadata={"help": "Visualize the action queue size"}
+        default=True, metadata={"help": "Visualize the action queue size"}
     )
 
     @property

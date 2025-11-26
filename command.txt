@@ -1,0 +1,24 @@
+python -m lerobot.async_inference.robot_client --server_address=213.192.2.94:40149  --task="Clean the countertop" --pretrained_name_or_path=griffinlabs/pi05_1877ep_pytorch_58k --actions_per_chunk=50 --policy_type=pi05 
+
+
+
+
+        --robot.left_arm_can_port=can1 \
+    --robot.right_arm_can_port=can0 \
+
+
+
+python -m lerobot.async_inference.robot_client --server_address=213.192.2.94:40148  --robot.type="bi_piper" --robot.id="bi_piper" --robot.cameras="{ top: {type: opencv, index_or_path: 8, width: 640, height: 480
+, fps: 30},right: {type: intelrealsense, serial_number_or_name=\"2
+18622271965\", width: 640, height: 480, fps: 30},right: {type: int
+elrealsense, serial_number_or_name=\"218622274856\", width: 640, h
+eight: 480, fps: 30},}" --task="Clean the countertop" --pretrained
+_name_or_path=griffinlabs/pi05_1877ep_pytorch_58k 
+
+python -m lerobot.async_inference.robot_client --server_address=213.192.2.94:40149 --robot.type=so100_follower --robot.port=/dev/ttyACM0 --robot.id=follower_so100 --robot.cameras="{ laptop: {type: opencv, index_or_path: 0, width: 640, height: 480, fps: 30}}" --task="dummy" --policy_type=act --pretrained_name_or_path=msr915/act --policy_device=mps --actions_per_chunk=50 --chunk_size_threshold=0.5 --aggregate_fn_name=weighted_average --debug_visualize_queue_size=True 
+
+
+
+
+python -m lerobot.async_inference.robot_client --server_address=213.173.111.204:15546  --task="Clean the countertop" --pretrained_name_or_path=gri
+ffinlabs/pi05_1877ep_pytorch_58k --actions_per_chunk=50 --policy_type=pi05 
